@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Synthetic log generator for benchmarking LogScope.
+
+Generates a log file in the LogScope format (``YYYY-MM-DD HH:MM:SS LEVEL
+message``) with realistic timestamps and messages, plus a configurable
+proportion of malformed lines for robustness testing.
+
+The file is written incrementally (one line at a time) so generating a
+100 MB file never requires holding the whole file in memory, and the
+output is fully reproducible for a given ``--seed``.
+
+Usage::
+
+    python scripts/gen_log --output sample.log --size-mb 100 --seed 42
+"""
+
+from __future__ import annotations
+
+import argparse
+import random
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Iterator
+
+BASE_TIMESTAMP = datetime(2026, 1, 1, 0, 0, 0)
+TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Weighted so a realistic log is mostly INFO, some WARN, fewer ERROR.
+LEVEL_WEIGHTS = (("INFO", 70), ("WARN", 20), ("ERROR", 10))
+
+INFO_MESSAGES = [
+    "Request completed successfully",
+    "Service started",
+    "Health check passed",
+    "Cache refreshed",
+    "User login successful",
+    "Scheduled job finished",
+    "Configuration reloaded",
+]
+
+WARN_MESSAGES = [
+    "Disk usage above 80 percent",
+    "Latency above threshold",
+    "Retrying connection to upstream service",
+    "Queue depth increasing",
+    "Deprecated API endpoint used",
+    "Slow database query detected",
+]
+
+ERROR_MESSAGES = [
+    "Connection refused",
+    "Timeout waiting for response",
+    "Unhandled exception in request handler",
+    "Database connection unavailable",
+    "Out of memory",
+    "Failed to write to disk",
+]
+
+MESSAGE_POOLS = {"INFO": INFO_MESSAGES, "WARN": WARN_MESSAGES, "ERROR": ERROR_MESSAGES}
+
+
+def _choose_level(rng: random.Random) -> str:
+    levels, weights = zip(*LEVEL_WEIGHTS)
+    return rng.choices(levels, weights=weights, k=1)[0]
+
+
+def _valid_line(rng: random.Random, timestamp: datetime) -> bytes:
+    level = _choose_level(rng)
+    message = rng.choice(MESSAGE_POOLS[level])
+    text = f"{timestamp.strftime(TIMESTAMP_FORMAT)} {level} {message}\n"
+    return text.encode("utf-8")
+
+
+def _malformed_line(rng: random.Random, timestamp: datetime) -> bytes:
+    """Produce one of a few realistic kinds of malformed/unsupported lines."""
+    kind = rng.randrange(5)
+    stamp = timestamp.strftime(TIMESTAMP_FORMAT)
+    if kind == 0:
+        text = f"{stamp} DEBUG Unsupported log level\n"
+    elif kind == 1:
+        text = "2026-13-40 99:99:99 ERROR Invalid calendar timestamp\n"
+    elif kind == 2:
+        text = f"{stamp} ERROR\n"
+    elif kind == 3:
+        text = "####corrupted-binary-fragment####\n"
+    else:
+        text = f"{stamp} A message with no level field\n"
+    return text.encode("utf-8")
+
+
+def generate_lines(rng: random.Random, malformed_ratio: float) -> Iterator[bytes]:
+    """Infinite generator of encoded log lines, advancing a simulated clock."""
+    current = BASE_TIMESTAMP
+    while True:
+        current += timedelta(seconds=rng.randint(0, 4))
+        if rng.random() < malformed_ratio:
+            yield _malformed_line(rng, current)
+        else:
+            yield _valid_line(rng, current)
+
+
+def generate_log_file(
+    output_path: Path,
+    size_mb: float,
+    seed: int,
+    malformed_ratio: float,
+    progress: bool = False,
+) -> int:
+    """Write a synthetic log file of approximately ``size_mb`` megabytes.
+
+    Returns the number of bytes actually written. Writes happen line by
+    line directly to disk - the generated content is never assembled in
+    memory as a single string or list.
+    """
+    target_bytes = int(size_mb * 1024 * 1024)
+    rng = random.Random(seed)
+    lines = generate_lines(rng, malformed_ratio)
+    written = 0
+    next_report = target_bytes // 10 or target_bytes
+
+    with open(output_path, "wb") as handle:
+        while written < target_bytes:
+            line = next(lines)
+            handle.write(line)
+            written += len(line)
+            if progress and written >= next_report:
+                pct = min(100, int(written * 100 / target_bytes)) if target_bytes else 100
+                print(f"  ... {pct}% ({written / (1024 * 1024):.1f} MB)", file=sys.stderr)
+                next_report += target_bytes // 10 or target_bytes
+
+    return written
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Generate a synthetic LogScope-format log file for testing and benchmarking."
+    )
+    parser.add_argument(
+        "--output", "-o", default="sample.log", help="Output file path (default: sample.log)."
+    )
+    parser.add_argument(
+        "--size-mb",
+        type=float,
+        default=100.0,
+        help="Approximate target size in megabytes (default: 100).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed; the same seed always produces the same file (default: 42).",
+    )
+    parser.add_argument(
+        "--malformed-ratio",
+        type=float,
+        default=0.02,
+        help="Approximate proportion (0-1) of malformed lines (default: 0.02).",
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print progress to stderr while generating.",
+    )
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not 0.0 <= args.malformed_ratio <= 1.0:
+        parser.error("--malformed-ratio must be between 0 and 1.")
+    if args.size_mb <= 0:
+        parser.error("--size-mb must be positive.")
+
+    output_path = Path(args.output)
+    written = generate_log_file(
+        output_path,
+        size_mb=args.size_mb,
+        seed=args.seed,
+        malformed_ratio=args.malformed_ratio,
+        progress=args.progress,
+    )
+    print(f"Wrote {written / (1024 * 1024):.2f} MB to {output_path} (seed={args.seed})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
