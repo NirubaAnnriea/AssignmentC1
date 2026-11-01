@@ -5,8 +5,9 @@ from datetime import datetime
 
 import pytest
 
+from logscope.commands.explain import ExplainResult
 from logscope.commands.grep import run_grep
-from logscope.commands.summary import compute_summary
+from logscope.commands.summary import ErrorFrequency, compute_summary
 from logscope.commands.timeline import compute_timeline
 from logscope.output import (
     ReportWriteError,
@@ -14,6 +15,8 @@ from logscope.output import (
     stream_grep_markdown,
     summary_to_dict,
     timeline_to_dict,
+    write_explain_json,
+    write_explain_markdown,
     write_summary_json,
     write_summary_markdown,
     write_timeline_json,
@@ -141,6 +144,55 @@ def test_grep_markdown_report_contains_matching_lines(tmp_path):
     content = report_path.read_text(encoding="utf-8")
     assert "2026-10-01 09:00:00 ERROR a" in content
     assert "Matches found: 1" in content
+
+
+def test_explain_json_includes_endpoint_and_explanation(tmp_path):
+    result = ExplainResult(
+        top_errors=[ErrorFrequency(message="boom", count=2)],
+        malformed_lines=1,
+        explanation="Likely a config issue.",
+        endpoint="https://example.invalid/explain",
+        model="some-model",
+    )
+    stream = _StringIOLike()
+    write_explain_json(result, stream)
+    payload = json.loads(stream.getvalue())
+    assert payload["command"] == "explain"
+    assert payload["top_errors"] == [{"message": "boom", "count": 2}]
+    assert payload["explanation"] == "Likely a config issue."
+    assert payload["endpoint"] == "https://example.invalid/explain"
+    assert payload["model"] == "some-model"
+    assert payload["malformed_lines"] == 1
+
+
+def test_explain_markdown_contains_explanation_and_errors(tmp_path):
+    result = ExplainResult(
+        top_errors=[ErrorFrequency(message="boom", count=2)],
+        malformed_lines=0,
+        explanation="Likely a config issue.",
+        endpoint="https://example.invalid/explain",
+    )
+    report_path = tmp_path / "explain.md"
+    write_explain_markdown(result, report_path)
+    content = report_path.read_text(encoding="utf-8")
+    assert "# LogScope Explain Report" in content
+    assert "boom" in content
+    assert "Likely a config issue." in content
+    assert "https://example.invalid/explain" in content
+
+
+def test_explain_markdown_reports_no_errors_found(tmp_path):
+    result = ExplainResult(
+        top_errors=[],
+        malformed_lines=0,
+        explanation="No ERROR entries were found, so there is nothing to explain.",
+        endpoint=None,
+    )
+    report_path = tmp_path / "explain.md"
+    write_explain_markdown(result, report_path)
+    content = report_path.read_text(encoding="utf-8")
+    assert "No errors were found." in content
+    assert "N/A (no errors to explain)" in content
 
 
 def test_report_write_error_on_unwritable_path(tmp_path):

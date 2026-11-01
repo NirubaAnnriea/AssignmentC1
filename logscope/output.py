@@ -33,6 +33,15 @@ JSON schemas (documented here, exercised by tests/test_output.py)::
         "malformed_lines": int
     }
 
+    explain -> {
+        "command": "explain",
+        "top_errors": [{"message": str, "count": int}, ...],   # up to 5
+        "explanation": str,
+        "endpoint": str | null,       # null when there were no errors
+        "model": str | null,          # null when there were no errors
+        "malformed_lines": int
+    }
+
 Markdown reports mirror the same information in a human-readable layout and
 are written to predictable filenames in the current working directory.
 """
@@ -45,6 +54,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO, Optional, Union
 
+from logscope.commands.explain import ExplainResult
 from logscope.commands.grep import GrepRun
 from logscope.commands.summary import SummaryResult
 from logscope.commands.timeline import TimelineResult, render_bar_chart
@@ -54,6 +64,7 @@ TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 SUMMARY_REPORT_FILENAME = "logscope-summary-report.md"
 TIMELINE_REPORT_FILENAME = "logscope-timeline-report.md"
 GREP_REPORT_FILENAME = "logscope-grep-report.md"
+EXPLAIN_REPORT_FILENAME = "logscope-explain-report.md"
 
 
 class ReportWriteError(Exception):
@@ -242,6 +253,55 @@ def stream_grep_markdown(
     except OSError as exc:
         raise ReportWriteError(f"Error while writing report file '{path}': {exc}") from exc
     return path, match_count
+
+
+# --------------------------------------------------------------------------
+# Explain
+# --------------------------------------------------------------------------
+
+
+def explain_to_dict(result: ExplainResult) -> dict:
+    return {
+        "command": "explain",
+        "top_errors": [
+            {"message": e.message, "count": e.count} for e in result.top_errors
+        ],
+        "explanation": result.explanation,
+        "endpoint": result.endpoint,
+        "model": result.model,
+        "malformed_lines": result.malformed_lines,
+    }
+
+
+def write_explain_json(result: ExplainResult, stream: Optional[IO[str]] = None) -> None:
+    stream = stream or sys.stdout
+    stream.write(json.dumps(explain_to_dict(result)))
+    stream.write("\n")
+
+
+def write_explain_markdown(
+    result: ExplainResult, file_path: Union[str, Path] = EXPLAIN_REPORT_FILENAME
+) -> Path:
+    lines = ["# LogScope Explain Report", ""]
+    lines.append(f"- LLM endpoint: {result.endpoint or 'N/A (no errors to explain)'}")
+    lines.append(f"- Model: {result.model or 'N/A'}")
+    lines.append(f"- Malformed lines skipped: {result.malformed_lines}")
+    lines.append("")
+    lines.append("## Top ERROR Messages")
+    lines.append("")
+    if not result.top_errors:
+        lines.append("No errors were found.")
+    else:
+        lines.append("| Rank | Message | Count |")
+        lines.append("|---|---|---|")
+        for rank, error in enumerate(result.top_errors, start=1):
+            lines.append(f"| {rank} | {error.message} | {error.count} |")
+    lines.append("")
+    lines.append("## Probable Root Cause (LLM)")
+    lines.append("")
+    lines.append(result.explanation)
+    lines.append("")
+    return _write_text_report(file_path, "\n".join(lines))
 
 
 def _write_text_report(file_path: Union[str, Path], content: str) -> Path:

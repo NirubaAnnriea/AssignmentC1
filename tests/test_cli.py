@@ -120,3 +120,57 @@ def test_empty_file_summary_does_not_crash(tmp_path, capsys, monkeypatch):
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["levels"] == {"INFO": 0, "WARN": 0, "ERROR": 0}
+
+
+def test_explain_missing_api_key_returns_nonzero(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("LOGSCOPE_LLM_API_KEY", raising=False)
+    log_file = write_log(tmp_path, "2026-10-01 09:00:01 ERROR boom\n")
+    exit_code = main(["explain", log_file])
+    assert exit_code != 0
+    assert "LOGSCOPE_LLM_API_KEY" in capsys.readouterr().err
+
+
+def test_explain_json_end_to_end(tmp_path, capsys, monkeypatch):
+    import logscope.commands.explain as explain_module
+
+    monkeypatch.setenv("LOGSCOPE_LLM_API_KEY", "secret-key")
+    monkeypatch.setattr(
+        explain_module,
+        "_default_http_post",
+        lambda endpoint, payload, api_key, timeout: {
+            "choices": [{"message": {"content": "Root cause: disk full."}}]
+        },
+    )
+    log_file = write_log(tmp_path, "2026-10-01 09:00:01 ERROR boom\n")
+    exit_code = main(["explain", log_file])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "explain"
+    assert payload["explanation"] == "Root cause: disk full."
+
+
+def test_explain_markdown_end_to_end(tmp_path, monkeypatch):
+    import logscope.commands.explain as explain_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOGSCOPE_LLM_API_KEY", "secret-key")
+    monkeypatch.setattr(
+        explain_module,
+        "_default_http_post",
+        lambda endpoint, payload, api_key, timeout: {
+            "choices": [{"message": {"content": "Root cause."}}]
+        },
+    )
+    log_file = write_log(tmp_path, "2026-10-01 09:00:01 ERROR boom\n")
+    exit_code = main(["explain", log_file, "--format", "md"])
+    assert exit_code == 0
+    assert (tmp_path / "logscope-explain-report.md").exists()
+
+
+def test_explain_no_errors_does_not_need_api_key(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("LOGSCOPE_LLM_API_KEY", raising=False)
+    log_file = write_log(tmp_path, "2026-10-01 09:00:00 INFO ok\n")
+    exit_code = main(["explain", log_file])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "No ERROR entries" in payload["explanation"]

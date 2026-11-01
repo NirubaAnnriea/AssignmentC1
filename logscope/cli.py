@@ -12,6 +12,7 @@ import argparse
 import sys
 from typing import Optional, Sequence
 
+from logscope.commands.explain import ExplainError, run_explain
 from logscope.commands.grep import (
     InvalidLevelError,
     InvalidSinceError,
@@ -22,12 +23,15 @@ from logscope.commands.grep import (
 from logscope.commands.summary import compute_summary
 from logscope.commands.timeline import InvalidBucketError, compute_timeline
 from logscope.output import (
+    EXPLAIN_REPORT_FILENAME,
     GREP_REPORT_FILENAME,
     ReportWriteError,
     SUMMARY_REPORT_FILENAME,
     TIMELINE_REPORT_FILENAME,
     stream_grep_json,
     stream_grep_markdown,
+    write_explain_json,
+    write_explain_markdown,
     write_summary_json,
     write_summary_markdown,
     write_timeline_json,
@@ -83,6 +87,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--format", choices=VALID_FORMATS, default="json", help="Output format."
     )
 
+    explain_parser = subparsers.add_parser(
+        "explain",
+        help="Send the top ERROR messages to an LLM for a probable root-cause summary.",
+    )
+    explain_parser.add_argument("logfile", help="Path to the log file to analyse.")
+    explain_parser.add_argument(
+        "--format", choices=VALID_FORMATS, default="json", help="Output format."
+    )
+
     return parser
 
 
@@ -133,10 +146,24 @@ def _run_grep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_explain(args: argparse.Namespace) -> int:
+    try:
+        result = run_explain(args.logfile)
+    except ExplainError as exc:
+        raise CliError(str(exc)) from exc
+    if args.format == "json":
+        write_explain_json(result)
+    else:
+        path = write_explain_markdown(result, EXPLAIN_REPORT_FILENAME)
+        print(f"Explain report written to {path}")
+    return 0
+
+
 _HANDLERS = {
     "summary": _run_summary,
     "timeline": _run_timeline,
     "grep": _run_grep,
+    "explain": _run_explain,
 }
 
 
